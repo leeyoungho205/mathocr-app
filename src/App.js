@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import PdfUploader from './components/PdfUploader';
 import Tesseract from 'tesseract.js';
-import { extractTableFromImageWithFetch } from './utils/openaiVisionFetch';
 
 function App() {
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -35,34 +34,47 @@ function App() {
         setIsLoading(false);
         return;
       }
-      // 회전된 이미지를 캔버스에 그려서 OCR
-      const img = new window.Image();
-      img.src = imageUrl;
-      await new Promise((resolve) => { img.onload = resolve; });
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (imageRotation % 180 === 0) {
-        canvas.width = img.width;
-        canvas.height = img.height;
-      } else {
-        canvas.width = img.height;
-        canvas.height = img.width;
-      }
-      ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((imageRotation * Math.PI) / 180);
-      ctx.drawImage(img, -img.width / 2, -img.height / 2);
-      ctx.restore();
-      const rotatedUrl = canvas.toDataURL('image/jpeg');
 
-      const { data: { text } } = await Tesseract.recognize(
-        rotatedUrl,
+      // 1. 우선 무료 Tesseract로 인식 시도
+      const { data: { text, confidence } } = await Tesseract.recognize(
+        imageUrl,
         'kor+eng',
         { logger: m => console.log(m) }
       );
-      setOcrResult(text);
-      setIsEditing(true); // 인식 후 바로 수정 모드
+
+      // 2. 결과가 너무 짧거나 신뢰도가 낮으면 구글 Vision API로 재시도
+      if (!text || text.length < 10 || (typeof confidence === 'number' && confidence < 60)) {
+        try {
+          // FormData 생성
+          const formData = new FormData();
+          formData.append('image', uploadedFile);
+
+          // 백엔드 서버로 이미지 전송
+          const response = await fetch('http://localhost:5001/api/ocr', {
+            method: 'POST',
+            body: formData
+          });
+
+          if (!response.ok) {
+            throw new Error('Vision API 요청 실패');
+          }
+
+          const result = await response.json();
+          if (result.error) {
+            throw new Error(result.error);
+          }
+
+          setOcrResult(result.text);
+        } catch (visionError) {
+          console.error('Vision API 에러:', visionError);
+          setOcrResult('OCR 처리 중 오류가 발생했습니다. 다시 시도해주세요.');
+        }
+      } else {
+        setOcrResult(text);
+      }
+      setIsEditing(true);
     } catch (error) {
+      console.error('OCR 에러:', error);
       setOcrResult('OCR 처리 중 오류가 발생했습니다.');
     }
     setIsLoading(false);
@@ -119,24 +131,6 @@ function App() {
     justifyContent: 'flex-start'
   };
 
-  const handleVisionExtract = async () => {
-    if (!uploadedFile) {
-      alert('이미지를 먼저 업로드하세요.');
-      return;
-    }
-    setIsLoading(true);
-    try {
-      const apiKey = process.env.REACT_APP_OPENAI_API_KEY;
-      const result = await extractTableFromImageWithFetch(uploadedFile, apiKey);
-      setOcrResult(result);
-      setIsEditing(false);
-      setFinalResult(result);
-    } catch (e) {
-      setOcrResult('Vision API 처리 중 오류가 발생했습니다.');
-    }
-    setIsLoading(false);
-  };
-
   return (
     <div style={{
       minHeight: '100vh',
@@ -172,17 +166,7 @@ function App() {
               }}
               disabled={isLoading || !uploadedFile}
             >
-              {isLoading ? '인식 중...' : '손글씨/숫자 인식(OCR) 시작'}
-            </button>
-            <button
-              onClick={handleVisionExtract}
-              style={{
-                background: '#8e24aa', color: '#fff', border: 'none', borderRadius: 8,
-                padding: '12px 24px', fontSize: 16, cursor: 'pointer', marginBottom: 16, marginLeft: 8
-              }}
-              disabled={isLoading || !uploadedFile}
-            >
-              Vision API로 표 추출
+              {isLoading ? '인식 중...' : '텍스트 인식(OCR) 시작'}
             </button>
             {(ocrResult || finalResult) && uploadedFile && uploadedFile.type === 'image/jpeg' && (
               <div style={{ width: '100%' }}>
@@ -233,7 +217,7 @@ function App() {
         </div>
       </div>
       <footer style={{ textAlign: 'center', marginTop: 48, color: '#888' }}>
-        © {new Date().getFullYear()} MathOCR. Powered by React & Tesseract.js
+        © {new Date().getFullYear()} MathOCR. Powered by React & Google Cloud Vision
       </footer>
     </div>
   );
